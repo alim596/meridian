@@ -1,0 +1,17 @@
+services:
+  engine:
+    build: ./engine
+    ports:
+      - "8080:8080"
+    volumes:
+      - journal:/data
+
+  terminal:
+    build: ./terminal
+    ports:
+      - "3000:80"
+    depends_on:
+      - engine
+
+volumes:
+  journal:
