@@ -1,5 +1,8 @@
 # MERIDIAN
 
+[![CI](https://github.com/alim596/meridian/actions/workflows/ci.yml/badge.svg)](https://github.com/alim596/meridian/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **A real-time exchange, end to end: matching engine, simulated market, event-sourced journal, and a live trading terminal.**
 
 Meridian is a self-contained financial exchange. A Go matching engine runs price-time
@@ -20,19 +23,7 @@ the house algos are eating whom.
 
 No database, no external services, no API keys. Clone it, run two commands, trade.
 
-```
-┌────────────────────────────────────────────────────────────────────────────┐
-│ MERIDIAN  EXCHANGE TERMINAL   ● LIVE  seq 48812  feed 240 msg/s  p99 4µs   │
-├──────────┬───────────────────────────────┬───────────────┬────────────────┤
-│ NVR      │                               │  ORDER BOOK   │  ORDER TICKET  │
-│ 184.51 ▲ │        candlesticks           │  184.61   93  │  [BUY][SELL]   │
-│ HLX      │      (1s / 5s / 1m)           │  184.56 ────  │  limit 184.51  │
-│  92.28 ▼ │                               │  184.51   23  │  qty 100       │
-│ ARC      ├───────────────────────────────┤───────────────┤  ─────────────  │
-│ QTM      │  BLOTTER                      │  TIME & SALES │  cash equity   │
-│ VYR      │  positions · orders · fills   │  tape stream  │  positions     │
-└──────────┴───────────────────────────────┴───────────────┴────────────────┘
-```
+![The Meridian terminal: live candles, L2 order book ladder with depth, time & sales tape, news wire moving prices, order ticket, and the Algo Deck for deploying strategy bots](docs/img/terminal.png)
 
 ## Architecture
 
