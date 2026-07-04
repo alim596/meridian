@@ -11,27 +11,33 @@ import (
 	"time"
 
 	"github.com/alim596/meridian/internal/account"
+	"github.com/alim596/meridian/internal/bots"
 	"github.com/alim596/meridian/internal/engine"
 	"github.com/alim596/meridian/internal/marketdata"
+	"github.com/alim596/meridian/internal/news"
 	"github.com/alim596/meridian/internal/orderbook"
 )
 
 const depthLevels = 24
 
+// Deps bundles everything the API serves.
+type Deps struct {
+	Engines map[string]*engine.Engine
+	Order   []string // stable instrument ordering for listings
+	Acct    *account.Manager
+	MD      *marketdata.MarketData
+	Hub     *Hub
+	News    *news.Engine
+	Bots    *bots.Manager
+}
+
 type Server struct {
-	engines map[string]*engine.Engine
-	order   []string // stable instrument ordering for listings
-	acct    *account.Manager
-	md      *marketdata.MarketData
-	hub     *Hub
+	Deps
 	started time.Time
 }
 
-func New(engines map[string]*engine.Engine, order []string, acct *account.Manager, md *marketdata.MarketData, hub *Hub) *Server {
-	return &Server{
-		engines: engines, order: order, acct: acct, md: md, hub: hub,
-		started: time.Now(),
-	}
+func New(d Deps) *Server {
+	return &Server{Deps: d, started: time.Now()}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -40,7 +46,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("GET /ws/market", s.hub.handleWS)
+	mux.HandleFunc("GET /ws/market", s.Hub.handleWS)
 
 	mux.HandleFunc("POST /api/session", s.createSession)
 	mux.HandleFunc("GET /api/instruments", s.listInstruments)
@@ -48,11 +54,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/candles", s.getCandles)
 	mux.HandleFunc("GET /api/metrics", s.getMetrics)
 
+	mux.HandleFunc("GET /api/news", s.getNews)
+	mux.HandleFunc("GET /api/leaderboard", s.getLeaderboard)
+
 	mux.HandleFunc("POST /api/orders", s.auth(s.placeOrder))
 	mux.HandleFunc("DELETE /api/orders/{instrument}/{id}", s.auth(s.cancelOrder))
 	mux.HandleFunc("GET /api/orders", s.auth(s.openOrders))
 	mux.HandleFunc("GET /api/account", s.auth(s.getAccount))
+	mux.HandleFunc("PATCH /api/account", s.auth(s.renameAccount))
 	mux.HandleFunc("GET /api/fills", s.auth(s.getFills))
+	mux.HandleFunc("POST /api/bots", s.auth(s.deployBot))
+	mux.HandleFunc("GET /api/bots", s.auth(s.listBots))
+	mux.HandleFunc("DELETE /api/bots/{id}", s.auth(s.stopBot))
 
 	return cors(mux)
 }
@@ -75,7 +88,7 @@ type authedHandler func(w http.ResponseWriter, r *http.Request, accountID string
 func (s *Server) auth(next authedHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("X-API-Key")
-		id, ok := s.acct.Resolve(key)
+		id, ok := s.Acct.Resolve(key)
 		if !ok {
 			writeErr(w, http.StatusUnauthorized, "missing or invalid API key")
 			return
@@ -101,7 +114,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 	}
 	json.NewDecoder(r.Body).Decode(&body) // body optional
-	id, key := s.acct.CreateSession(body.Name)
+	id, key := s.Acct.CreateSession(body.Name)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"accountId": id,
 		"apiKey":    key,
@@ -115,10 +128,10 @@ type instrumentInfo struct {
 }
 
 func (s *Server) listInstruments(w http.ResponseWriter, _ *http.Request) {
-	out := make([]instrumentInfo, 0, len(s.order))
-	for _, sym := range s.order {
-		eng := s.engines[sym]
-		st, _ := s.md.StatsFor(sym)
+	out := make([]instrumentInfo, 0, len(s.Order))
+	for _, sym := range s.Order {
+		eng := s.Engines[sym]
+		st, _ := s.MD.StatsFor(sym)
 		out = append(out, instrumentInfo{Instrument: eng.Inst, Stats: st})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -133,7 +146,7 @@ func packLevels(levels []orderbook.PriceLevel) [][2]int64 {
 }
 
 func (s *Server) getDepth(w http.ResponseWriter, r *http.Request) {
-	eng, ok := s.engines[r.URL.Query().Get("instrument")]
+	eng, ok := s.Engines[r.URL.Query().Get("instrument")]
 	if !ok {
 		writeErr(w, http.StatusNotFound, "unknown instrument")
 		return
@@ -154,7 +167,7 @@ func (s *Server) getDepth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getCandles(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	sym := q.Get("instrument")
-	if _, ok := s.engines[sym]; !ok {
+	if _, ok := s.Engines[sym]; !ok {
 		writeErr(w, http.StatusNotFound, "unknown instrument")
 		return
 	}
@@ -167,7 +180,7 @@ func (s *Server) getCandles(w http.ResponseWriter, r *http.Request) {
 	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 && n <= 3000 {
 		limit = n
 	}
-	writeJSON(w, http.StatusOK, s.md.Candles(sym, interval, limit))
+	writeJSON(w, http.StatusOK, s.MD.Candles(sym, interval, limit))
 }
 
 func (s *Server) getMetrics(w http.ResponseWriter, _ *http.Request) {
@@ -176,9 +189,9 @@ func (s *Server) getMetrics(w http.ResponseWriter, _ *http.Request) {
 		Orders  int64  `json:"orders"`
 		Latency any    `json:"latency"`
 	}
-	insts := make([]instMetrics, 0, len(s.order))
-	for _, sym := range s.order {
-		snap := s.engines[sym].Latency.Snapshot()
+	insts := make([]instMetrics, 0, len(s.Order))
+	for _, sym := range s.Order {
+		snap := s.Engines[sym].Latency.Snapshot()
 		insts = append(insts, instMetrics{Symbol: sym, Orders: snap.Count, Latency: snap})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -205,7 +218,7 @@ func (s *Server) placeOrder(w http.ResponseWriter, r *http.Request, accountID st
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	eng, ok := s.engines[req.Instrument]
+	eng, ok := s.Engines[req.Instrument]
 	if !ok {
 		writeErr(w, http.StatusNotFound, "unknown instrument")
 		return
@@ -251,7 +264,7 @@ func (s *Server) placeOrder(w http.ResponseWriter, r *http.Request, accountID st
 }
 
 func (s *Server) cancelOrder(w http.ResponseWriter, r *http.Request, accountID string) {
-	eng, ok := s.engines[r.PathValue("instrument")]
+	eng, ok := s.Engines[r.PathValue("instrument")]
 	if !ok {
 		writeErr(w, http.StatusNotFound, "unknown instrument")
 		return
@@ -272,7 +285,7 @@ func (s *Server) cancelOrder(w http.ResponseWriter, r *http.Request, accountID s
 }
 
 func (s *Server) openOrders(w http.ResponseWriter, _ *http.Request, accountID string) {
-	orders := s.acct.OpenOrders(accountID)
+	orders := s.Acct.OpenOrders(accountID)
 	if orders == nil {
 		orders = []account.OpenOrder{}
 	}
@@ -280,7 +293,7 @@ func (s *Server) openOrders(w http.ResponseWriter, _ *http.Request, accountID st
 }
 
 func (s *Server) getAccount(w http.ResponseWriter, _ *http.Request, accountID string) {
-	view, ok := s.acct.Snapshot(accountID, s.md.Marks())
+	view, ok := s.Acct.Snapshot(accountID, s.MD.Marks())
 	if !ok {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
@@ -293,5 +306,64 @@ func (s *Server) getFills(w http.ResponseWriter, r *http.Request, accountID stri
 	if n, err := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64); err == nil {
 		since = n
 	}
-	writeJSON(w, http.StatusOK, s.acct.Fills(accountID, since))
+	writeJSON(w, http.StatusOK, s.Acct.Fills(accountID, since))
+}
+
+// ---- v2: news, leaderboard, bots ----
+
+func (s *Server) getNews(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 300 {
+		limit = n
+	}
+	writeJSON(w, http.StatusOK, s.News.Items(limit))
+}
+
+func (s *Server) getLeaderboard(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.Acct.Leaderboard(s.MD.Marks(), 25))
+}
+
+func (s *Server) renameAccount(w http.ResponseWriter, r *http.Request, accountID string) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeErr(w, http.StatusBadRequest, "name required")
+		return
+	}
+	if !s.Acct.Rename(accountID, body.Name) {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"name": body.Name})
+}
+
+func (s *Server) deployBot(w http.ResponseWriter, r *http.Request, accountID string) {
+	var body struct {
+		Instrument string `json:"instrument"`
+		Strategy   string `json:"strategy"`
+		Name       string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	bot, err := s.Bots.Deploy(accountID, body.Instrument, body.Strategy, body.Name)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, bot)
+}
+
+func (s *Server) listBots(w http.ResponseWriter, _ *http.Request, accountID string) {
+	writeJSON(w, http.StatusOK, s.Bots.List(accountID, s.MD.Marks()))
+}
+
+func (s *Server) stopBot(w http.ResponseWriter, r *http.Request, accountID string) {
+	if err := s.Bots.Stop(accountID, r.PathValue("id")); err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"stopped": true})
 }

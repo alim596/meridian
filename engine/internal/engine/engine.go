@@ -28,6 +28,21 @@ type Instrument struct {
 // MaxOrderQty bounds a single order; a crude but honest sanity limit.
 const MaxOrderQty = 100_000
 
+// Volatility circuit breaker (LULD-style, simplified): if a trade prints
+// more than haltMovePct away from where the instrument traded haltRefWindow
+// ago, continuous trading pauses for haltDuration. Resting orders stay on
+// the book and cancels are still accepted during the halt.
+const (
+	haltMovePct   = 4.0
+	haltRefWindow = 30 * time.Second
+	haltDuration  = 25 * time.Second
+)
+
+type refPoint struct {
+	ts    time.Time
+	price int64
+}
+
 // RiskChecker validates an order before it reaches the book. Implemented by
 // the account manager; nil means no checks (used in tests and replay).
 type RiskChecker interface {
@@ -74,10 +89,11 @@ type SnapshotCmd struct {
 }
 
 type SnapshotResp struct {
-	Seq       uint64                  `json:"seq"`
-	Bids      []orderbook.PriceLevel  `json:"bids"`
-	Asks      []orderbook.PriceLevel  `json:"asks"`
-	LastPrice int64                   `json:"lastPrice"`
+	Seq         uint64                 `json:"seq"`
+	Bids        []orderbook.PriceLevel `json:"bids"`
+	Asks        []orderbook.PriceLevel `json:"asks"`
+	LastPrice   int64                  `json:"lastPrice"`
+	HaltedUntil int64                  `json:"haltedUntil,omitempty"` // unix ms, 0 = trading
 }
 
 // Engine owns one instrument's book.
@@ -91,6 +107,10 @@ type Engine struct {
 	seq         uint64
 	nextOrderID uint64
 	lastPrice   int64
+
+	halted      bool
+	haltedUntil time.Time
+	refPrices   []refPoint
 
 	Latency *metrics.Histogram
 }
@@ -127,10 +147,16 @@ func (e *Engine) Snapshot(depth int) SnapshotResp {
 }
 
 func (e *Engine) Run(ctx context.Context) {
+	// The ticker only exists to emit the resume event promptly when a halt
+	// expires; the matching path itself never blocks on it.
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-tick.C:
+			e.maybeResume()
 		case cmd := <-e.cmds:
 			switch c := cmd.(type) {
 			case SubmitCmd:
@@ -139,10 +165,53 @@ func (e *Engine) Run(ctx context.Context) {
 				e.handleCancel(c)
 			case SnapshotCmd:
 				bids, asks := e.book.Snapshot(c.Depth)
-				c.Resp <- SnapshotResp{Seq: e.seq, Bids: bids, Asks: asks, LastPrice: e.lastPrice}
+				resp := SnapshotResp{Seq: e.seq, Bids: bids, Asks: asks, LastPrice: e.lastPrice}
+				if e.halted {
+					resp.HaltedUntil = e.haltedUntil.UnixMilli()
+				}
+				c.Resp <- resp
 			}
 		}
 	}
+}
+
+func (e *Engine) maybeResume() {
+	if e.halted && time.Now().After(e.haltedUntil) {
+		e.halted = false
+		e.refPrices = e.refPrices[:0] // fresh volatility window post-halt
+		e.emit(e.event(EvResume))
+	}
+}
+
+// checkHalt runs after each trade: compare the print against the oldest
+// reference price still inside the lookback window.
+func (e *Engine) checkHalt(price int64, now time.Time) {
+	for len(e.refPrices) >= 2 && e.refPrices[1].ts.Before(now.Add(-haltRefWindow)) {
+		e.refPrices = e.refPrices[1:]
+	}
+	if len(e.refPrices) > 0 {
+		ref := e.refPrices[0].price
+		if ref > 0 {
+			move := 100 * float64(price-ref) / float64(ref)
+			if move < 0 {
+				move = -move
+			}
+			if move >= haltMovePct {
+				e.halted = true
+				e.haltedUntil = now.Add(haltDuration)
+				e.refPrices = e.refPrices[:0]
+				ev := e.event(EvHalt)
+				ev.Halt = &HaltEvent{
+					Until: e.haltedUntil.UnixMilli(), RefPrice: ref,
+					TradePrice: price, MovePct: move,
+				}
+				e.emit(ev)
+				e.refPrices = append(e.refPrices, refPoint{ts: now, price: price})
+				return
+			}
+		}
+	}
+	e.refPrices = append(e.refPrices, refPoint{ts: now, price: price})
 }
 
 func (e *Engine) next() uint64 {
@@ -193,6 +262,10 @@ func (e *Engine) handleSubmit(c SubmitCmd) {
 		e.reject(c, err.Error())
 		return
 	}
+	if e.halted {
+		e.reject(c, "trading halted: volatility circuit breaker")
+		return
+	}
 	if e.risk != nil {
 		if err := e.risk.CheckOrder(c.Account, e.Inst.Symbol, c.Side, c.Type, c.Price, c.Qty, e.lastPrice); err != nil {
 			e.reject(c, err.Error())
@@ -220,6 +293,7 @@ func (e *Engine) handleSubmit(c SubmitCmd) {
 	}
 	e.emit(ev)
 
+	now := time.Now()
 	for _, tr := range res.Trades {
 		e.lastPrice = tr.Price
 		tev := e.event(EvTrade)
@@ -229,6 +303,9 @@ func (e *Engine) handleSubmit(c SubmitCmd) {
 			TakerAccount: tr.TakerAccount, MakerAccount: tr.MakerAccount,
 		}
 		e.emit(tev)
+		if !e.halted {
+			e.checkHalt(tr.Price, now)
+		}
 	}
 	for _, u := range res.Updates {
 		lev := e.event(EvL2)

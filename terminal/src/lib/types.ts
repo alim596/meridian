@@ -89,6 +89,36 @@ export interface Trade {
   seq: number;
 }
 
+export interface NewsItem {
+  id: number;
+  ts: number; // unix ms
+  symbol?: string; // absent = macro
+  headline: string;
+  body: string;
+  severity: number; // -3 .. +3
+  impactPct: number;
+}
+
+export interface LeaderEntry {
+  name: string;
+  id: string;
+  kind: "trader" | "bot" | "house";
+  equity: number;
+  pnl: number;
+}
+
+export interface BotView {
+  id: string;
+  name: string;
+  strategy: string;
+  symbol: string;
+  accountId: string;
+  createdAt: number;
+  running: boolean;
+  equity: number;
+  pnl: number;
+}
+
 export interface EngineMetrics {
   uptimeSec: number;
   goroutines: number;

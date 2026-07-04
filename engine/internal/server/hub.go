@@ -37,6 +37,8 @@ type wsMsg struct {
 	Qty        int64           `json:"qty,omitempty"`
 	TakerSide  string          `json:"takerSide,omitempty"`
 	Stats      json.RawMessage `json:"stats,omitempty"`
+	News       any             `json:"news,omitempty"`
+	Until      int64           `json:"until,omitempty"` // halt end, unix ms
 	Error      string          `json:"error,omitempty"`
 }
 
@@ -101,6 +103,10 @@ func (h *Hub) OnEvent(ev engine.Event) {
 			Type: "trade", Instrument: ev.Instrument, Seq: ev.Seq, TS: ev.TS,
 			Price: ev.Trade.Price, Qty: ev.Trade.Qty, TakerSide: ev.Trade.TakerSide,
 		}
+	case engine.EvHalt:
+		m = wsMsg{Type: "halt", Instrument: ev.Instrument, Seq: ev.Seq, TS: ev.TS, Until: ev.Halt.Until}
+	case engine.EvResume:
+		m = wsMsg{Type: "resume", Instrument: ev.Instrument, Seq: ev.Seq, TS: ev.TS}
 	default:
 		return // order lifecycle events are private; not broadcast
 	}
@@ -119,9 +125,18 @@ func (h *Hub) OnEvent(ev engine.Event) {
 	h.mu.Unlock()
 }
 
+// BroadcastNews pushes a wire story to every connected client (news is
+// exchange-wide, not per-subscription).
+func (h *Hub) BroadcastNews(item any) {
+	h.broadcastAll(wsMsg{Type: "news", News: item, TS: time.Now().UnixNano()})
+}
+
 // BroadcastStats pushes the periodic stats ticker to all clients.
 func (h *Hub) BroadcastStats(stats json.RawMessage) {
-	m := wsMsg{Type: "stats", Stats: stats, TS: time.Now().UnixNano()}
+	h.broadcastAll(wsMsg{Type: "stats", Stats: stats, TS: time.Now().UnixNano()})
+}
+
+func (h *Hub) broadcastAll(m wsMsg) {
 	h.mu.Lock()
 	var drop []*client
 	for c := range h.clients {
@@ -199,7 +214,7 @@ func (h *Hub) readPump(c *client) {
 			c.enqueue(wsMsg{
 				Type: "snapshot", Instrument: req.Instrument, Seq: snap.Seq,
 				Bids: packLevels(snap.Bids), Asks: packLevels(snap.Asks),
-				Last: snap.LastPrice, TS: time.Now().UnixNano(),
+				Last: snap.LastPrice, Until: snap.HaltedUntil, TS: time.Now().UnixNano(),
 			})
 		case "unsubscribe":
 			c.setSub(req.Instrument, false)

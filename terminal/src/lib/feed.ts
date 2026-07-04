@@ -11,12 +11,12 @@
 // Book state lives outside React; the UI batches reads via
 // requestAnimationFrame so a burst of quote updates costs one render.
 
-import type { Stats, Trade } from "./types";
+import type { NewsItem, Stats, Trade } from "./types";
 
 export type FeedStatus = "connecting" | "syncing" | "live" | "down";
 
 interface WsMsg {
-  type: "snapshot" | "l2" | "trade" | "stats" | "error";
+  type: "snapshot" | "l2" | "trade" | "stats" | "news" | "halt" | "resume" | "error";
   instrument?: string;
   seq?: number;
   ts?: number;
@@ -28,6 +28,8 @@ interface WsMsg {
   qty?: number;
   takerSide?: "buy" | "sell";
   stats?: Stats[];
+  news?: NewsItem;
+  until?: number; // halt end, unix ms
   error?: string;
 }
 
@@ -37,6 +39,7 @@ export interface BookState {
   lastPrice: number;
   seq: number;
   status: FeedStatus;
+  haltedUntil: number; // unix ms; 0 = trading normally
 }
 
 const MAX_TAPE = 80;
@@ -49,6 +52,7 @@ class Feed {
   private subs = new Set<string>();
   private listeners = new Set<() => void>();
   private statsListeners = new Set<(s: Stats[]) => void>();
+  private newsListeners = new Set<(n: NewsItem) => void>();
   private reconnectDelay = 500;
   private msgCount = 0;
 
@@ -87,6 +91,7 @@ class Feed {
   private requestSub(symbol: string) {
     this.books.set(symbol, {
       bids: new Map(), asks: new Map(), lastPrice: 0, seq: 0, status: "syncing",
+      haltedUntil: 0,
     });
     this.pending.set(symbol, []);
     if (this.ws?.readyState === WebSocket.OPEN) {
@@ -106,6 +111,7 @@ class Feed {
         b.lastPrice = m.last ?? 0;
         b.seq = m.seq ?? 0;
         b.status = "live";
+        b.haltedUntil = m.until ?? 0;
         // replay deltas that raced ahead of the snapshot
         for (const d of this.pending.get(sym) ?? []) {
           if ((d.seq ?? 0) > b.seq) this.applyDelta(b, d);
@@ -114,7 +120,9 @@ class Feed {
         break;
       }
       case "l2":
-      case "trade": {
+      case "trade":
+      case "halt":
+      case "resume": {
         const sym = m.instrument!;
         const b = this.books.get(sym);
         if (!b) return;
@@ -128,6 +136,9 @@ class Feed {
       }
       case "stats":
         if (m.stats) for (const fn of this.statsListeners) fn(m.stats);
+        return;
+      case "news":
+        if (m.news) for (const fn of this.newsListeners) fn(m.news);
         return;
       case "error":
         console.warn("feed error:", m.error);
@@ -145,7 +156,11 @@ class Feed {
       return;
     }
     b.seq = m.seq ?? b.seq;
-    if (m.type === "l2") {
+    if (m.type === "halt") {
+      b.haltedUntil = m.until ?? 0;
+    } else if (m.type === "resume") {
+      b.haltedUntil = 0;
+    } else if (m.type === "l2") {
       const side = m.side === "buy" ? b.bids : b.asks;
       if (m.qty === undefined || m.qty === 0) side.delete(m.price!);
       else side.set(m.price!, m.qty);
@@ -184,6 +199,11 @@ class Feed {
   onStats(fn: (s: Stats[]) => void): () => void {
     this.statsListeners.add(fn);
     return () => this.statsListeners.delete(fn);
+  }
+
+  onNews(fn: (n: NewsItem) => void): () => void {
+    this.newsListeners.add(fn);
+    return () => this.newsListeners.delete(fn);
   }
 
   private notify() {

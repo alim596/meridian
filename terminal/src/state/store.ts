@@ -1,9 +1,12 @@
 import { create } from "zustand";
 import type {
-  AccountView, EngineMetrics, Fill, Instrument, OpenOrder, Session, Stats,
+  AccountView, BotView, EngineMetrics, Fill, Instrument, LeaderEntry,
+  NewsItem, OpenOrder, Session, Stats,
 } from "../lib/types";
 import * as api from "../lib/api";
 import { feed } from "../lib/feed";
+
+const MAX_NEWS = 120;
 
 interface TerminalState {
   session: Session | null;
@@ -13,6 +16,9 @@ interface TerminalState {
   account: AccountView | null;
   openOrders: OpenOrder[];
   fills: Fill[];
+  news: NewsItem[];
+  leaders: LeaderEntry[];
+  bots: BotView[];
   metrics: EngineMetrics | null;
   bookTick: number; // bumped ≤1×/frame when feed data changes
   msgRate: number;
@@ -31,6 +37,9 @@ export const useStore = create<TerminalState>((set, get) => ({
   account: null,
   openOrders: [],
   fills: [],
+  news: [],
+  leaders: [],
+  bots: [],
   metrics: null,
   bookTick: 0,
   msgRate: 0,
@@ -70,6 +79,18 @@ export const useStore = create<TerminalState>((set, get) => ({
         });
       });
 
+      // news: seed from history, then live over WS
+      api.getNews().then((items) => set({ news: items })).catch(() => {});
+      feed.onNews((item) => {
+        set((s) => ({ news: [item, ...s.news].slice(0, MAX_NEWS) }));
+      });
+
+      // public leaderboard poll
+      const pollLeaders = () =>
+        api.getLeaderboard().then((l) => set({ leaders: l })).catch(() => {});
+      void pollLeaders();
+      setInterval(() => void pollLeaders(), 4000);
+
       // private data + metrics polling
       const poll = async () => {
         try {
@@ -93,11 +114,12 @@ export const useStore = create<TerminalState>((set, get) => ({
   select: (symbol) => set({ selected: symbol }),
 
   refreshPrivate: async () => {
-    const [account, openOrders, fills] = await Promise.all([
+    const [account, openOrders, fills, bots] = await Promise.all([
       api.getAccount(),
       api.getOpenOrders(),
       api.getFills(0),
+      api.getBots(),
     ]);
-    set({ account, openOrders, fills: fills.slice().reverse() });
+    set({ account, openOrders, fills: fills.slice().reverse(), bots });
   },
 }));

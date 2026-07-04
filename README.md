@@ -9,6 +9,15 @@ and a Bloomberg-style terminal built in React streams the books, tape, and candl
 WebSocket while you trade against the simulated flow with a real cash account, positions,
 and mark-to-market P&L.
 
+And the market has a plot. A **news engine** composes fictional wire headlines —
+earnings beats, short reports, regulator probes, macro shocks — and injects the matching
+jump and volatility regime into the affected instrument, live. Gap hard enough and the
+**volatility circuit breaker** halts the stock with a countdown, exactly like a real
+venue. Think you can do better than clicking buttons? **Deploy a trading bot** —
+momentum, mean-reversion, or market-making — with its own $250k book and the same risk
+checks you get, then watch the **live leaderboard** to see whether you, your bots, or
+the house algos are eating whom.
+
 No database, no external services, no API keys. Clone it, run two commands, trade.
 
 ```
@@ -84,6 +93,21 @@ session is reproducible from the journal alone.
 - **Risk & settlement** — pre-trade buying-power and position-limit checks, cash
   settlement per fill, average-cost P&L accounting (including crossing through zero),
   mark-to-market equity.
+- **Narrative market dynamics** — the news engine schedules stories on a Poisson clock,
+  maps severity to a fair-value jump plus a temporary volatility regime, and streams the
+  headline to every terminal the instant it hits the tape. Severity-3 stories are sized
+  to occasionally trip the circuit breaker on purpose.
+- **Volatility circuit breakers** — a print more than 4% away from where the instrument
+  traded 30 seconds ago halts continuous trading for 25 seconds (LULD-style, simplified):
+  new orders reject, cancels still work, resting orders survive, and the halt state rides
+  the same sequenced event stream as everything else.
+- **User-deployable strategy bots** — momentum, mean-reversion, and market-making
+  strategies anyone can launch with one click. Each bot gets its own risk-checked
+  account and goroutine, trades through the public order path with zero privileges, and
+  answers to the leaderboard. Deploy momentum and mean-reversion on the same symbol and
+  watch regimes decide who wins.
+- **Live leaderboard** — every account (humans, their bots, and the house market makers)
+  ranked by session P&L, marked to last trade.
 - **Testing** — table-driven matching tests, a structural invariant checker run under
   20k random operations, a **fuzz test asserting lot conservation** (every submitted lot
   is traded, canceled, or resting — nothing created or destroyed), account settlement
@@ -134,7 +158,9 @@ reconstructs the final book — from the log alone.
 | `DELETE /api/orders/{sym}/{id}` | cancel — auth |
 | `GET /api/account` · `/api/orders` · `/api/fills` | portfolio, open orders, fills — auth |
 | `GET /api/depth` · `/api/candles` · `/api/metrics` | L2 snapshot, OHLCV, latency histograms |
-| `WS /ws/market` | subscribe per instrument: snapshot + sequenced deltas + trades + stats |
+| `GET /api/news` · `/api/leaderboard` | wire stories, session rankings |
+| `POST /api/bots` · `GET /api/bots` · `DELETE /api/bots/{id}` | deploy / list / stop strategy bots — auth |
+| `WS /ws/market` | subscribe per instrument: snapshot + sequenced deltas + trades + halts + news + stats |
 
 Prices cross the API as integer ticks (100 ticks = $1). Auth is a bearer key in
 `X-API-Key` — sessions are ephemeral by design; this is a demo exchange, not a bank.
@@ -152,6 +178,8 @@ engine/
   internal/marketdata/ candle aggregation, session stats
   internal/journal/    append-only JSONL persistence
   internal/sim/        fair-value process + trading agents
+  internal/news/       headline generator -> fair-value shocks
+  internal/bots/       user-deployable strategy bots
   internal/server/     REST + WebSocket hub
 terminal/
   src/lib/feed.ts      snapshot+delta protocol client

@@ -26,27 +26,56 @@ import (
 	"github.com/alim596/meridian/internal/orderbook"
 )
 
-type Agent struct {
-	eng   *engine.Engine
-	acct  *account.Manager
-	rng   *rand.Rand
-	fv    atomic.Int64 // fair value in ticks
-	prevFv atomic.Int64
+// Shock is an exogenous market event (news): an instantaneous fair-value
+// jump plus a temporary volatility regime.
+type Shock struct {
+	JumpFrac float64       // e.g. +0.02 = gap up 2%
+	VolMult  float64       // sigma multiplier while the regime lasts
+	Duration time.Duration // how long the elevated-vol regime persists
 }
 
-// Run starts all agents for one instrument and blocks until ctx is done.
-func Run(ctx context.Context, eng *engine.Engine, acct *account.Manager, seed int64) {
-	a := &Agent{eng: eng, acct: acct, rng: rand.New(rand.NewSource(seed))}
+type Agent struct {
+	eng    *engine.Engine
+	acct   *account.Manager
+	rng    *rand.Rand
+	fv     atomic.Int64 // fair value in ticks
+	prevFv atomic.Int64
+	shocks chan Shock
+}
+
+// New builds the agent set for one instrument; call Start to run it.
+func New(eng *engine.Engine, acct *account.Manager, seed int64) *Agent {
+	a := &Agent{
+		eng: eng, acct: acct,
+		rng:    rand.New(rand.NewSource(seed)),
+		shocks: make(chan Shock, 8),
+	}
 	a.fv.Store(eng.Inst.InitPrice)
 	a.prevFv.Store(eng.Inst.InitPrice)
+	return a
+}
 
+// Start launches all agents for the instrument.
+func (a *Agent) Start(ctx context.Context) {
 	go a.runFairValue(ctx)
 	go a.runMarketMaker(ctx)
 	go a.runTakers(ctx)
-	<-ctx.Done()
 }
 
-// runFairValue advances the OU process on a fixed clock.
+// ApplyShock feeds a news shock into the fair-value process. Non-blocking;
+// drops if the (generous) buffer is full.
+func (a *Agent) ApplyShock(s Shock) {
+	select {
+	case a.shocks <- s:
+	default:
+	}
+}
+
+// FairValue exposes the current fair value (bots and news sizing use it).
+func (a *Agent) FairValue() int64 { return a.fv.Load() }
+
+// runFairValue advances the OU process on a fixed clock; news shocks gap
+// the anchor and temporarily raise volatility (a crude regime switch).
 func (a *Agent) runFairValue(ctx context.Context) {
 	const dt = 150 * time.Millisecond
 	fv := float64(a.eng.Inst.InitPrice)
@@ -55,15 +84,29 @@ func (a *Agent) runFairValue(ctx context.Context) {
 	sigma := fv * 0.0006    // per-step vol ~6bps
 	anchorVol := fv * 0.0002
 
+	volMult := 1.0
+	var volUntil time.Time
+
 	ticker := time.NewTicker(dt)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case s := <-a.shocks:
+			anchor *= 1 + s.JumpFrac
+			// price gaps most of the way immediately; OU pulls in the rest
+			fv += (anchor - fv) * 0.75
+			volMult = s.VolMult
+			volUntil = time.Now().Add(s.Duration)
+			a.prevFv.Store(a.fv.Load())
+			a.fv.Store(int64(math.Round(fv)))
 		case <-ticker.C:
-			anchor += anchorVol * a.rng.NormFloat64()
-			fv += theta*(anchor-fv) + sigma*a.rng.NormFloat64()
+			if volMult != 1.0 && time.Now().After(volUntil) {
+				volMult = 1.0
+			}
+			anchor += anchorVol * volMult * a.rng.NormFloat64()
+			fv += theta*(anchor-fv) + sigma*volMult*a.rng.NormFloat64()
 			if fv < 100 { // 1.00 floor so the sim never goes degenerate
 				fv = 100
 				anchor = math.Max(anchor, 120)

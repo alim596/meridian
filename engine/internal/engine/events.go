@@ -12,6 +12,7 @@ type Event struct {
 	Order      *OrderEvent `json:"order,omitempty"`
 	Trade      *TradeEvent `json:"trade,omitempty"`
 	Level      *LevelEvent `json:"level,omitempty"`
+	Halt       *HaltEvent  `json:"haltInfo,omitempty"`
 }
 
 // Event kinds.
@@ -21,6 +22,8 @@ const (
 	EvCanceled = "canceled"
 	EvTrade    = "trade"
 	EvL2       = "l2"
+	EvHalt     = "halt"
+	EvResume   = "resume"
 )
 
 // OrderEvent carries order lifecycle detail. Account is private data: the
@@ -52,6 +55,16 @@ type LevelEvent struct {
 	Side  string `json:"side"`
 	Price int64  `json:"price"`
 	Qty   int64  `json:"qty"`
+}
+
+// HaltEvent records a volatility circuit breaker firing: the trade that
+// tripped it, the reference price it was measured against, and when
+// continuous trading resumes.
+type HaltEvent struct {
+	Until      int64   `json:"until"` // unix ms
+	RefPrice   int64   `json:"refPrice"`
+	TradePrice int64   `json:"tradePrice"`
+	MovePct    float64 `json:"movePct"`
 }
 
 // PublicCopy returns the event with account identifiers removed, safe to

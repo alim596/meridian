@@ -44,6 +44,9 @@ export function OrderBook({ onPricePick }: { onPricePick: (price: number) => voi
   }, [book, useStore.getState().bookTick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const last = book?.lastPrice ?? 0;
+  const haltedUntil = book?.haltedUntil ?? 0;
+  const halted = haltedUntil > Date.now();
+  const haltSecs = halted ? Math.max(0, Math.ceil((haltedUntil - Date.now()) / 1000)) : 0;
 
   return (
     <section className="panel">
@@ -51,6 +54,11 @@ export function OrderBook({ onPricePick }: { onPricePick: (price: number) => voi
         <span className="panel-title">Order Book</span>
         <span className="micro">{selected} · L2</span>
       </div>
+      {halted && (
+        <div className="halt-banner">
+          ⛔ VOLATILITY HALT — resumes in {haltSecs}s
+        </div>
+      )}
       <div className="panel-body book-grid">
         {/* asks render top-down: worst at top, best at the middle */}
         <div style={{ display: "flex", flexDirection: "column-reverse" }}>

@@ -65,7 +65,9 @@ type Account struct {
 	Name      string               `json:"name"`
 	Cash      int64                `json:"cash"` // ticks
 	Sim       bool                 `json:"sim"`  // simulation account: skip risk checks
+	Bot       bool                 `json:"bot"`  // user-deployed strategy bot
 	Positions map[string]*Position `json:"positions"`
+	startCash int64
 	fills     []Fill
 	open      map[string]*OpenOrder
 }
@@ -104,10 +106,41 @@ func (m *Manager) CreateSession(name string) (accountID, apiKey string) {
 	m.accounts[accountID] = &Account{
 		ID: accountID, Name: name, Cash: StartingCash,
 		Positions: make(map[string]*Position),
+		startCash: StartingCash,
 		open:      make(map[string]*OpenOrder),
 	}
 	m.keys[apiKey] = accountID
 	return accountID, apiKey
+}
+
+// CreateBotAccount provisions a risk-checked account for a strategy bot.
+// Bots trade with real (play) money and can absolutely go broke.
+func (m *Manager) CreateBotAccount(name string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := randomID("bot_", 6)
+	m.accounts[id] = &Account{
+		ID: id, Name: name, Cash: StartingCash, Bot: true,
+		Positions: make(map[string]*Position),
+		startCash: StartingCash,
+		open:      make(map[string]*OpenOrder),
+	}
+	return id
+}
+
+// Rename sets an account's display name (leaderboard call sign).
+func (m *Manager) Rename(accountID, name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.accounts[accountID]
+	if !ok || name == "" {
+		return false
+	}
+	if len(name) > 24 {
+		name = name[:24]
+	}
+	a.Name = name
+	return true
 }
 
 // CreateSimAccount provisions an internal account for simulation agents.
@@ -337,6 +370,48 @@ func (m *Manager) Snapshot(accountID string, marks map[string]int64) (View, bool
 		v.Equity += float64(mark) * float64(p.Qty)
 	}
 	return v, true
+}
+
+// LeaderEntry is one row of the exchange leaderboard.
+type LeaderEntry struct {
+	Name   string  `json:"name"`
+	ID     string  `json:"id"` // masked for privacy
+	Kind   string  `json:"kind"` // trader | bot | house
+	Equity float64 `json:"equity"`
+	PnL    float64 `json:"pnl"`
+}
+
+// Leaderboard ranks every account — humans, their bots, and the house
+// simulation agents — by session P&L, marked against last prices.
+func (m *Manager) Leaderboard(marks map[string]int64, limit int) []LeaderEntry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]LeaderEntry, 0, len(m.accounts))
+	for _, a := range m.accounts {
+		equity := float64(a.Cash)
+		for sym, p := range a.Positions {
+			equity += float64(marks[sym]) * float64(p.Qty)
+		}
+		kind := "trader"
+		if a.Sim {
+			kind = "house"
+		} else if a.Bot {
+			kind = "bot"
+		}
+		id := a.ID
+		if len(id) > 9 {
+			id = id[:9] + "…"
+		}
+		out = append(out, LeaderEntry{
+			Name: a.Name, ID: id, Kind: kind,
+			Equity: equity, PnL: equity - float64(a.startCash),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PnL > out[j].PnL })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // PositionQty returns the signed position an account holds in an

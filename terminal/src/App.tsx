@@ -7,6 +7,8 @@ import { OrderBook } from "./components/OrderBook";
 import { Tape } from "./components/Tape";
 import { OrderTicket } from "./components/OrderTicket";
 import { Blotter } from "./components/Blotter";
+import { NewsWire } from "./components/NewsWire";
+import { BotDeck } from "./components/BotDeck";
 
 export default function App() {
   const boot = useStore((s) => s.boot);
@@ -21,7 +23,10 @@ export default function App() {
   return (
     <div className="app">
       <StatusBar />
-      <Watchlist />
+      <div className="area-watch">
+        <Watchlist />
+        <NewsWire />
+      </div>
       <div className="area-center">
         <Chart />
         <Blotter />
@@ -32,6 +37,7 @@ export default function App() {
       </div>
       <div className="area-ticket">
         <OrderTicket pickedPrice={pickedPrice} />
+        <BotDeck />
       </div>
       <footer className="footbar area-foot">
         <span>

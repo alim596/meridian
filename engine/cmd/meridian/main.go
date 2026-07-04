@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/alim596/meridian/internal/account"
+	"github.com/alim596/meridian/internal/bots"
 	"github.com/alim596/meridian/internal/bus"
 	"github.com/alim596/meridian/internal/engine"
 	"github.com/alim596/meridian/internal/journal"
 	"github.com/alim596/meridian/internal/marketdata"
+	"github.com/alim596/meridian/internal/news"
 	"github.com/alim596/meridian/internal/server"
 	"github.com/alim596/meridian/internal/sim"
 )
@@ -69,14 +71,28 @@ func main() {
 	}
 	go hub.RunStatsTicker(ctx, func() any { return md.AllStats() })
 
+	agents := make(map[string]*sim.Agent, len(instruments))
+	names := make(map[string]string, len(instruments))
 	if *simOn {
 		for i, inst := range instruments {
-			go sim.Run(ctx, engines[inst.Symbol], acct, *seed+int64(i))
+			a := sim.New(engines[inst.Symbol], acct, *seed+int64(i))
+			a.Start(ctx)
+			agents[inst.Symbol] = a
+			names[inst.Symbol] = inst.Name
 		}
 		log.Printf("simulation running for %d instruments (seed %d)", len(instruments), *seed)
 	}
 
-	srv := &http.Server{Addr: *addr, Handler: server.New(engines, order, acct, md, hub).Handler()}
+	newsEngine := news.New(agents, names, *seed^0x5eed, func(item news.Item) { hub.BroadcastNews(item) })
+	if *simOn {
+		go newsEngine.Run(ctx)
+	}
+	botMgr := bots.NewManager(ctx, engines, acct, md)
+
+	srv := &http.Server{Addr: *addr, Handler: server.New(server.Deps{
+		Engines: engines, Order: order, Acct: acct, MD: md,
+		Hub: hub, News: newsEngine, Bots: botMgr,
+	}).Handler()}
 	go func() {
 		log.Printf("meridian exchange listening on %s", *addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

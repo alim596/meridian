@@ -141,6 +141,52 @@ func TestValidation(t *testing.T) {
 	}
 }
 
+func TestVolatilityHalt(t *testing.T) {
+	e, sink := newTestEngine(t, nil)
+
+	// establish a reference print at 10000, plus a resting order to cancel later
+	submit(e, "mm", orderbook.Ask, 10000, 5)
+	submit(e, "taker", orderbook.Bid, 10000, 5)
+	resting := submit(e, "mm", orderbook.Bid, 9000, 5)
+
+	// print 5% away inside the window -> breaker fires
+	submit(e, "mm", orderbook.Ask, 10500, 5)
+	r := submit(e, "taker", orderbook.Bid, 10500, 5)
+	if r.FilledQty != 5 {
+		t.Fatalf("triggering trade should still fill: %+v", r)
+	}
+
+	var halt *Event
+	for _, ev := range sink.all() {
+		if ev.Kind == EvHalt {
+			cp := ev
+			halt = &cp
+		}
+	}
+	if halt == nil {
+		t.Fatal("no halt event emitted for 5% move")
+	}
+	if halt.Halt.RefPrice != 10000 || halt.Halt.TradePrice != 10500 {
+		t.Fatalf("halt detail: %+v", halt.Halt)
+	}
+
+	// new orders are rejected during the halt...
+	rej := submit(e, "taker", orderbook.Bid, 10500, 1)
+	if rej.Status != "rejected" || rej.Reason == "" {
+		t.Fatalf("order during halt: %+v", rej)
+	}
+	// ...cancels are not
+	resp := make(chan CancelResp, 1)
+	e.Cancel(CancelCmd{OrderID: resting.OrderID, Account: "mm", Resp: resp})
+	if c := <-resp; !c.OK {
+		t.Fatalf("cancel during halt should work: %+v", c)
+	}
+	snap := e.Snapshot(1)
+	if snap.HaltedUntil == 0 {
+		t.Fatal("snapshot should carry haltedUntil during halt")
+	}
+}
+
 func TestPublicCopyStripsAccounts(t *testing.T) {
 	ev := Event{
 		Kind:  EvTrade,

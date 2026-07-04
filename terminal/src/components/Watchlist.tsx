@@ -1,11 +1,13 @@
 import { useStore } from "../state/store";
+import { feed } from "../lib/feed";
 import { dirClass, pct, px, qty } from "../lib/fmt";
 
 export function Watchlist() {
   const { instruments, stats, selected, select } = useStore();
+  useStore((s) => s.bookTick);
 
   return (
-    <section className="panel area-watch">
+    <section className="panel">
       <div className="panel-head">
         <span className="panel-title">Instruments</span>
         <span className="micro">{instruments.length}</span>
@@ -19,7 +21,12 @@ export function Watchlist() {
               className={`watch-row ${selected === inst.symbol ? "sel" : ""}`}
               onClick={() => select(inst.symbol)}
             >
-              <span className="watch-sym">{inst.symbol}</span>
+              <span className="watch-sym">
+                {inst.symbol}
+                {(feed.book(inst.symbol)?.haltedUntil ?? 0) > Date.now() && (
+                  <span className="halt-badge">HALT</span>
+                )}
+              </span>
               <span className={`watch-last ${dirClass(st?.changePct ?? 0)}`}>
                 {st ? px(st.last, inst.priceScale) : "—"}
               </span>

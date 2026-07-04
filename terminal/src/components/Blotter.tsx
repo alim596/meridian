@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { useStore } from "../state/store";
-import { cancelOrder } from "../lib/api";
+import { cancelOrder, renameAccount } from "../lib/api";
 import { dirClass, money, px, qty, tapeTime } from "../lib/fmt";
 
-type Tab = "positions" | "orders" | "fills";
+type Tab = "positions" | "orders" | "fills" | "leaders";
 
 export function Blotter() {
-  const { account, openOrders, fills, refreshPrivate } = useStore();
+  const { account, openOrders, fills, leaders, refreshPrivate } = useStore();
   const [tab, setTab] = useState<Tab>("positions");
+  const [callSign, setCallSign] = useState("");
 
   const positions = Object.entries(account?.positions ?? {}).filter(([, p]) => p.qty !== 0 || p.realized !== 0);
 
@@ -25,7 +26,7 @@ export function Blotter() {
       <div className="panel-head">
         <span className="panel-title">Blotter</span>
         <span className="tabs">
-          {(["positions", "orders", "fills"] as Tab[]).map((t) => (
+          {(["positions", "orders", "fills", "leaders"] as Tab[]).map((t) => (
             <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>
               {t}
               {t === "orders" && openOrders.length > 0 ? ` (${openOrders.length})` : ""}
@@ -90,6 +91,56 @@ export function Blotter() {
               </tbody>
             </table>
           ))}
+
+        {tab === "leaders" && (
+          <>
+            <div className="callsign-row">
+              <input
+                placeholder="set your call sign…"
+                value={callSign}
+                onChange={(e) => setCallSign(e.target.value)}
+                maxLength={24}
+              />
+              <button
+                disabled={!callSign.trim()}
+                onClick={() => {
+                  void renameAccount(callSign.trim()).then(() => refreshPrivate());
+                  setCallSign("");
+                }}
+              >
+                SET
+              </button>
+            </div>
+            {leaders.length === 0 ? (
+              <div className="empty">leaderboard warming up</div>
+            ) : (
+              <table className="blot">
+                <thead>
+                  <tr>
+                    <th>#</th><th>Trader</th><th>Kind</th><th>Equity</th><th>Session P&amp;L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {leaders.map((l, i) => {
+                    const you = account && l.name === account.name;
+                    return (
+                      <tr key={l.id + l.name} className={you ? "you" : ""}>
+                        <td>{i + 1}</td>
+                        <td>
+                          {l.name}
+                          {you ? " ◂ you" : ""}
+                        </td>
+                        <td className="micro">{l.kind}</td>
+                        <td>{money(Math.round(l.equity))}</td>
+                        <td className={dirClass(l.pnl)}>{money(Math.round(l.pnl))}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </>
+        )}
 
         {tab === "fills" &&
           (fills.length === 0 ? (

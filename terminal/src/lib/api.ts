@@ -1,5 +1,6 @@
 import type {
-  AccountView, Candle, EngineMetrics, Fill, Instrument, OpenOrder, Session, SubmitResult,
+  AccountView, BotView, Candle, EngineMetrics, Fill, Instrument, LeaderEntry,
+  NewsItem, OpenOrder, Session, SubmitResult,
 } from "./types";
 
 const SESSION_KEY = "meridian.session.v1";
@@ -77,3 +78,14 @@ export const placeOrder = (p: OrderParams) =>
 
 export const cancelOrder = (instrument: string, orderId: number) =>
   request<{ ok: boolean }>(`/api/orders/${instrument}/${orderId}`, { method: "DELETE" });
+
+export const getNews = (limit = 60) => request<NewsItem[]>(`/api/news?limit=${limit}`);
+export const getLeaderboard = () => request<LeaderEntry[]>("/api/leaderboard");
+export const renameAccount = (name: string) =>
+  request<{ name: string }>("/api/account", { method: "PATCH", body: JSON.stringify({ name }) });
+
+export const getBots = () => request<BotView[]>("/api/bots");
+export const deployBot = (instrument: string, strategy: string) =>
+  request<BotView>("/api/bots", { method: "POST", body: JSON.stringify({ instrument, strategy }) });
+export const stopBot = (id: string) =>
+  request<{ stopped: boolean }>(`/api/bots/${id}`, { method: "DELETE" });
